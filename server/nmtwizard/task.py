@@ -8,7 +8,7 @@ import semver
 from copy import deepcopy
 from enum import Enum
 from nmtwizard.capacity import Capacity
-from nmtwizard.helper import build_task_id, get_cpu_count, get_registry, change_parent_task
+from nmtwizard.helper import build_task_id, get_cpu_count, get_gpu_count, get_registry, change_parent_task
 
 import six
 
@@ -214,11 +214,9 @@ class TaskTrain(TaskBase):
         self._task_type = "train"
         self._parent_task_id = parent_task_id
 
-        if "ncpus" not in task_infos.content:
-            if "ngpus" not in task_infos.content:
-                task_infos.content["ngpus"] = 0
-            task_infos.content["ncpus"] = get_cpu_count(task_infos.routes_configuration.service_config,
-                                                        task_infos.content["ngpus"], "train")
+        task_infos.content["ngpus"] = get_gpu_count(task_infos.routes_configuration.service_config, "train")
+        task_infos.content["ncpus"] = get_cpu_count(task_infos.routes_configuration.service_config,
+                                                    task_infos.content["ngpus"], "train")
 
         TaskBase.__init__(self, task_infos, must_patch_config_name=True)
 

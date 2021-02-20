@@ -46,6 +46,7 @@ class Worker(object):
             self._available_cap = capacity
 
         def _is_authorized(self, task_entity, task_capacity):
+            """check authorized entity only and gpu only condition"""
             only_entities = self._service.get_server_detail(self._name, "entities")
             if only_entities and (task_entity not in only_entities or not only_entities[task_entity]):
                 self._logger.debug('[AZ-EXCLUDED-ENTITY] %s , %s', self._name, task_entity)
@@ -56,6 +57,16 @@ class Worker(object):
                 self._logger.debug('[AZ-EXCLUDED-GPU] task %s excluded on Gpu machine %s.', task_capacity, self._name)
                 return False
             return True
+
+        def _check_allowed_task_machines(self, task_id):
+            """check allowed task on machine with the current task"""
+            type = task_id.split("_")[-1]
+            allowed_tasks = self._service.get_server_detail(self._name, "allowed_tasks")
+            if len(type) > 12:
+                type = "train"
+            if type in allowed_tasks:
+                return True
+            return False
 
     class WorkerLogger:
         def __init__(self, service, instance_id, worker_id):
@@ -360,14 +371,19 @@ class Worker(object):
         task_required_ngpus = task_expected_capacity.ngpus
         return task_required_ngpus > 0
 
-    def _distribute_machine_for_task(self, task_id, task_entity, task_expected_capacity, request_resource, service, machines):
+    def _distribute_machine_for_task(self, task_id, task_entity, task_expected_capacity, request_resource, service,
+                                     machines):
         best_resource = None
         br_remaining_xpus = Capacity(-1, -1)
         for name, machine in six.iteritems(machines):
-            if _compatible_resource(name, request_resource) and machine._is_authorized(task_entity, task_expected_capacity):
+            if _compatible_resource(name, request_resource) \
+                and machine._is_authorized(task_entity, task_expected_capacity) \
+                and machine._check_allowed_task_machines(task_id):
+
                 better_remaining_xpus = self._reserve_resource(
                     service, name, machine._init_capacity, task_id,
                     task_expected_capacity, br_remaining_xpus)
+
                 if better_remaining_xpus is not None:
                     if best_resource is not None:
                         self._release_resource(service, best_resource, task_id, task_expected_capacity)
@@ -464,7 +480,8 @@ class Worker(object):
             return Capacity(remaining_gpus, remaining_cpus)
 
     def _release_resource(self, service, resource, task_id, nxpus):
-        """remove the task from resource queue
+        """
+        remove the task from resource queue
         """
         self._logger.debug('releasing resource:%s on service: %s for %s %s',
                            resource, service.name, task_id, nxpus)
@@ -484,6 +501,7 @@ class Worker(object):
     def _select_best_task_to_process(self, service):
         """find the best next task to push to the work queue
         """
+
         class EntityUsage:
             def __init__(self, current_usage, entity_name, usage_coeff):
                 self._entity = entity_name
@@ -502,11 +520,13 @@ class Worker(object):
                 self._current_usage_capacity += current_usage
 
             def __eq__(self, other):
-                return self._weighted_usage[0] == other._weighted_usage[0] and self._weighted_usage[1] == other._weighted_usage[1]
+                return self._weighted_usage[0] == other._weighted_usage[0] and self._weighted_usage[1] == \
+                       other._weighted_usage[1]
 
             def __lt__(self, other):
                 return self._weighted_usage[1] < other._weighted_usage[1] or \
-                       (self._weighted_usage[1] == other._weighted_usage[1] and self._weighted_usage[0] < other._weighted_usage[0])
+                       (self._weighted_usage[1] == other._weighted_usage[1] and self._weighted_usage[0] <
+                        other._weighted_usage[0])
 
             def __le__(self, other):
                 return self == other or self < other
@@ -515,7 +535,7 @@ class Worker(object):
             def initialize_entities_usage(mongo_client, service_name):
                 entity_usage_weights = config.get_entities_limit_rate(mongo_client, service_name)
                 weight_sum = float(sum([w for w in entity_usage_weights.values() if w > 0]))
-                entities_usage = {e: EntityUsage(None, e, float(weight_sum)/r if r > 0 else 0)
+                entities_usage = {e: EntityUsage(None, e, float(weight_sum) / r if r > 0 else 0)
                                   for e, r in six.iteritems(entity_usage_weights)}
                 return entities_usage
 
@@ -533,7 +553,8 @@ class Worker(object):
                 self._logger = logger
 
             def __str__(self):
-                return "Task ( %s / %s ; %s ; Priority:%d)" % (self._task_id, self._capacity, self._entity_usage, self._priority)
+                return "Task ( %s / %s ; %s ; Priority:%d)" % (
+                    self._task_id, self._capacity, self._entity_usage, self._priority)
 
             def __gt__(self, other):
                 return self.is_higher_priority(other)
@@ -547,7 +568,8 @@ class Worker(object):
 
             def _is_more_respectful_usage(self, other):
                 if self._entity == other._entity:  # same entity, go for highest priority
-                    is_more_prio = self._priority > other._priority or (self._priority == other._priority and self._launched_time < other._launched_time)
+                    is_more_prio = self._priority > other._priority or (
+                            self._priority == other._priority and self._launched_time < other._launched_time)
                     return is_more_prio
                 my_entity_usage = resource_mgr.entities_usage[self._entity]
                 other_entity_usage = resource_mgr.entities_usage[other._entity]
@@ -555,7 +577,8 @@ class Worker(object):
                     return self._launched_time < other._launched_time
 
                 result = my_entity_usage < other_entity_usage
-                self._logger.debug("AZ-COMPUSE: my: %s.Other: %s . Result = %s", my_entity_usage, other_entity_usage, result)
+                self._logger.debug("AZ-COMPUSE: my: %s.Other: %s . Result = %s", my_entity_usage, other_entity_usage,
+                                   result)
                 return result
 
             def is_higher_priority(self, other_task):
@@ -601,10 +624,12 @@ class Worker(object):
                             return None
 
                 task_capacity = Capacity(self._redis.hget(next_keyt, 'ngpus'), self._redis.hget(next_keyt, 'ncpus'))
-                candidate_task = CandidateTask(next_task_id, task_entity, self._redis, task_capacity, resource_mgr.entities_usage[task_entity], self._logger)
+                candidate_task = CandidateTask(next_task_id, task_entity, self._redis, task_capacity,
+                                               resource_mgr.entities_usage[task_entity], self._logger)
                 # check now the task has a chance to be processed by any machine
                 for srv, machine in six.iteritems(resource_mgr._machines):
                     can_be_processed = machine._is_authorized(candidate_task._entity, candidate_task._capacity) \
+                                       and machine._check_allowed_task_machines(next_task_id) \
                                        and candidate_task._capacity.inf_or_eq(machine._init_capacity)
                     if can_be_processed:
                         return candidate_task
@@ -615,7 +640,8 @@ class Worker(object):
             def __init__(self, worker):
                 self.preallocated_task_resource = {}
                 resources = service.list_resources()
-                self._machines = {res: Worker.Machine(service, res, resources[res], worker._logger) for res in resources}
+                self._machines = {res: Worker.Machine(service, res, resources[res], worker._logger) for res in
+                                  resources}
                 self.entities_usage = {}
                 self.worker = worker
 
@@ -670,7 +696,7 @@ class Worker(object):
 
                 return len(resource_mgr._machines) > 0
 
-        with self._redis.acquire_lock('service:'+service.name):
+        with self._redis.acquire_lock('service:' + service.name):
             queue = 'queued:%s' % service.name
             count = self._redis.llen(queue)
             if count == 0:
@@ -705,7 +731,8 @@ class Worker(object):
                             alloc_resource_config = self._services[self._service]._machines[allocated_resource]
                             alloc_port = self._select_port_for_deployed_model(alloc_resource_config)
                             if alloc_port is None:
-                                self._logger.info('%s: there is no port available in resource %s', task_id, allocated_resource)
+                                self._logger.info('%s: there is no port available in resource %s', task_id,
+                                                  allocated_resource)
                                 break
                             # save port to task content in redis
                             task_content = json.loads(self._redis.hget(keyt, "content"))
@@ -726,5 +753,6 @@ class Worker(object):
     def _get_current_config(self, task_id):
         task_entity = task.get_owner_entity(self._redis, task_id)
         storages_entities_filter = task.get_storages_entity(self._redis, task_id)
-        current_config = config.get_entity_config(self._mongo_client, self._service, storages_entities_filter, task_entity)
+        current_config = config.get_entity_config(self._mongo_client, self._service, storages_entities_filter,
+                                                  task_entity)
         return current_config
